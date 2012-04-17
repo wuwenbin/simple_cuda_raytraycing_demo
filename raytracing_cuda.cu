@@ -99,9 +99,6 @@ struct Ray {
 struct PerspectiveCamera {
   float3 eye, front, right, up;
   float fovScale;
-  PerspectiveCamera(float3 e, float3 f, float3 u, float v)
-    : eye(e), front(f), right(cross(f, u)), up(cross(right, f)), 
-    fovScale(tan(v * 0.5 * 3.1415926 / 180) * 2) {}
 
   __device__ Ray generateRay(float x, float y) const {
     float3 r = right* ((x - 0.5) * fovScale);
@@ -111,6 +108,10 @@ struct PerspectiveCamera {
   }
 };
 
+PerspectiveCamera makePerspectiveCamera(float3 e, float3 f, float3 u, float v) {
+  PerspectiveCamera c = {e, f, cross(f, u), cross(cross(f,u), f) , tan(v * 0.5 * 3.1415926 / 180) * 2};
+  return c;
+};
 enum g_t {G_SPHERE, G_PLANE} ;
 struct IntersectResult {
   g_t g_type;
@@ -127,68 +128,73 @@ struct Sphere {
   float reflectiveness;
   float3 lightDir;
   float3 lightColor;
-  Sphere() {}
-  Sphere(float3 c, float r, float3 d, float3 sp, int sh, float re = 0.0) :
-    center(c), radius(r), sqrRadius(r * r),
-    diffuse(d), specular(sp), shininess(sh), reflectiveness(re) { 
-      lightDir = normalize(make_float3(1, 1, 1));
-      lightColor = make_float3(1, 1, 1);
-  }
 
-  __device__ bool intersect(Ray* ray, IntersectResult* result) const {
-    float3 v = ray->origin - center;
+  __device__ inline bool intersect(Ray& ray, IntersectResult& result) const {
+    float3 v = ray.origin - center;
     float a0 = sqrlength(v) - sqrRadius;
-    float DdotV = dot(ray->direction, v);
+    float DdotV = dot(ray.direction, v);
     if (DdotV <= 0) {
       float discr = DdotV * DdotV - a0;
       if (discr >= 0) {
-        result->g_type = G_SPHERE;
-        result->distance = -DdotV - sqrt(discr);
-        result->position = ray->getPoint(result->distance);
-        result->normal = normalize(result->position - center);
-        result->reflectiveness = reflectiveness;
+        result.g_type = G_SPHERE;
+        result.distance = -DdotV - sqrt(discr);
+        result.position = ray.getPoint(result.distance);
+        result.normal = normalize(result.position - center);
+        result.reflectiveness = reflectiveness;
         return true;
       }
     }
     return false;
   }
 
-  __device__ float3 sample(Ray* ray, float3 position, float3 normal) const {
+  __device__ inline float3 sample(Ray ray, float3 position, float3 normal) const {
+    
     float NdotL = dot(normal, lightDir);
-    float3 H = normalize(lightDir - ray->direction);
+    float3 H = normalize(lightDir - ray.direction);
     float NdotH = dot(normal, H);
     float3 diffuseTerm = diffuse * fmaxf(NdotL, 0.0);
-    float3 specularTerm = specular * powf(fmaxf(NdotH, 0.0), shininess);
+    float3 specularTerm = specular * __powf(fmaxf(NdotH, 0.0), shininess);
     return modulate(lightColor, diffuseTerm + specularTerm);
+    
   }
 };
 
+Sphere makeSphere(float3 c, float r, float3 d, float3 sp, int sh, float re = 0.0) {
+  Sphere s = {
+    c, r, r * r, d, sp, sh ,re,
+    normalize(make_float3(1, 1, 1)),
+    make_float3(1, 1, 1)
+  };
+  return s;
+};
 struct Plane {
   float3 normal, position;
   float scale, reflectiveness;
-  Plane(float3 n, float d, float s, float r)
-    : normal(n), position(normal * d), scale(s), reflectiveness(r) {}
-  Plane() {}
-  __device__ bool intersect(Ray* ray, IntersectResult* result) const {
-    float a = dot(ray->direction, normal);
+  __device__ inline bool intersect(Ray ray, IntersectResult& result) const {
+    float a = dot(ray.direction, normal);
     if (a >= 0.0)
       return false;
-    float b = dot(normal, ray->origin - position);
+    float b = dot(normal, ray.origin - position);
     float d = -b / a;
-    result->g_type = G_PLANE;
-    result->distance = d;
-    result->position = ray->getPoint(d);
-    result->normal = normal;
-    result->reflectiveness = reflectiveness;
+    result.g_type = G_PLANE;
+    result.distance = d;
+    result.position = ray.getPoint(d);
+    result.normal = normal;
+    result.reflectiveness = reflectiveness;
     return true;
   }
 
-  __device__ float3 sample(Ray* ray, float3 position, float3 normal) const {
+  __device__ inline float3 sample(Ray ray, float3 position, float3 normal) const {
     if (fmodf(fabsf(floorf(position.x * 0.1) + floorf(position.z * scale)), 2) < 1)
       return make_float3(0, 0, 0);
     else
       return make_float3(1, 1, 1);
   }
+};
+
+Plane makePlane(float3 n, float d, float s, float r) {
+  Plane p = {n, n * d, s, r};
+  return p;
 };
 struct RayTracingParam {
   PerspectiveCamera camera;
@@ -197,68 +203,64 @@ struct RayTracingParam {
   int planes_n;
   Plane planes[10];
   int maxReflect;
-} param = 
+} cpuparam = 
 {
-  PerspectiveCamera(make_float3(0, 5, 15), make_float3(0, 0, -1),
+  makePerspectiveCamera(make_float3(0, 5, 15), make_float3(0, 0, -1),
                     make_float3(0, 1, 0), 90),
   2,
-  {Sphere(make_float3(-10, 10, -10), 10, 
+  {makeSphere(make_float3(-10, 10, -10), 10, 
           make_float3(1, 0, 0), make_float3(1, 1, 1), 16, 0.25),
-   Sphere(make_float3(10, 10, -10), 10, 
+   makeSphere(make_float3(10, 10, -10), 10, 
           make_float3(0, 0, 1), make_float3(1, 1, 1), 16, 0.25)},
    1,
-   {Plane(make_float3(0, 1, 0), 0, 0.1, 0.25)}
+   {makePlane(make_float3(0, 1, 0), 0, 0.1, 0.25)}
 };
 
+__constant__ RayTracingParam param;
 template <typename T>
-__device__ inline void intersect(T* geometries, int n, Ray* r,
-                                 IntersectResult* result,
-                                 bool* ok) {
+__device__ inline bool intersect(T* geometries, int n, Ray r, IntersectResult& result) {
+  IntersectResult ir;
+  bool ok = false;
   for (int i = 0; i < n; ++i) {
-    IntersectResult ir;
     ir.g_id = i;
-    if (geometries[i].intersect(r, &ir) && ir.distance < result->distance) {
-      result->distance = ir.distance;
-      *result = ir;
-      *ok = true;
+    if (geometries[i].intersect(r, ir) && ir.distance < result.distance) {
+      result.distance = ir.distance;
+      result = ir;
+      ok = true;
     }
   }
-}
-
-__device__ inline bool intersect(const RayTracingParam* param, Ray* r,
-                                 IntersectResult* result) {
-  bool ok = false;
-  result->distance = FLT_MAX;
-  intersect(param->spheres, param->spheres_n, r, result, &ok);
-  intersect(param->planes, param->planes_n, r, result, &ok);
   return ok;
 }
 
-__device__ inline float3 sample(const RayTracingParam* param, Ray* r,
-                               IntersectResult* result) {
-  if (result->g_type == G_SPHERE)
-    return param->spheres[result->g_id].sample(r, result->position,
-                                               result->normal);
-  else if (result->g_type == G_PLANE)
-    return 
-      param->planes[result->g_id].sample(r,
-                                         result->position,result->normal);
-  return make_float3(0, 0, 0);
+__device__ inline bool intersect(Ray r, IntersectResult& result) {
+  bool ok = false;
+  result.distance = FLT_MAX;
+  ok = intersect(param.spheres, param.spheres_n, r, result) || ok;
+  ok = intersect(param.planes, param.planes_n, r, result) || ok;
+  return ok;
 }
 
-__device__ inline float3 gpuSample(const RayTracingParam* param, Ray* ray_) {
+__device__ inline float3 sample(Ray r, int g_type, int g_id, float3 position,
+                                float3 normal) {
+  if (g_type)
+    return param.planes[g_id].sample(r, position, normal);
+  else 
+    return param.spheres[g_id].sample(r, position, normal);
+}
+
+__device__ inline float3 gpuSample(Ray ray) {
   float3 color = make_float3(0, 0, 0);
   float reflectiveness = 1.0;
   float r = 1.0;
   float3 c = make_float3(0, 0, 0);
-  Ray ray = *ray_;
+  IntersectResult ir;
+  
   for (int i = 0; i < maxReflect + 1; ++i) {
-    IntersectResult ir;
-    if (!intersect(param, &ray, &ir)) break;
+    if (!intersect(ray, ir)) break;
     color += reflectiveness * (1 - r) * c;
     reflectiveness = reflectiveness * r;
     r = ir.reflectiveness;
-    c = sample(param, &ray, &ir);
+    c = sample(ray, ir.g_type, ir.g_id, ir.position, ir.normal);
     if (r > 0) {
       Ray newray = {ir.position,
                  ir.normal * (-2*dot(ir.normal,ray.direction)) + ray.direction};
@@ -268,37 +270,36 @@ __device__ inline float3 gpuSample(const RayTracingParam* param, Ray* ray_) {
   }
   return color + reflectiveness * c;
 }
-__global__ void gpuRayTracing(const RayTracingParam* param, Color* out) {
-  int x = blockIdx.x * blockDim.x + threadIdx.x, 
-      y = blockIdx.y * blockDim.y + threadIdx.y;
-  int index = y * width + x;
+
+__global__ void gpuRayTracing(unsigned* out) {
+  int index = blockIdx.x * blockDim.x + threadIdx.x;
+  
+  int y = index / width, x = index % width;
   float sx = x / float(width), sy = y / float(height);
-  Ray r = param->camera.generateRay(sx, sy);
-  float3 c = gpuSample(param, &r);
-  out[index].r = __saturatef(c.x) * 255;
-  out[index].g = __saturatef(c.y) * 255;
-  out[index].b = __saturatef(c.z) * 255;
-  out[index].a = 255;
+  Ray r = param.camera.generateRay(sx, sy);
+  float3 c = gpuSample(r);
+  unsigned char c4[] = {
+      __saturatef(c.z) * 255,
+      __saturatef(c.y) * 255,
+      __saturatef(c.x) * 255,
+      255};
+
+  unsigned ct = *reinterpret_cast<unsigned*>(c4); 
+  out[index] = ct;
 }
 
 int main() {
-  Color* gpuout;
-  RayTracingParam* gpuparam;
-  dim3 blockPerGrid(width / 16, height / 16);
-  dim3 threadPerBlock(16, 16);
+  unsigned* gpuout;
   cudaSetDevice(0);
   cudaMallocHost(&image, width * height * sizeof(Color));
-  cudaMalloc(&gpuparam, sizeof(RayTracingParam));
-  cudaMemcpy(gpuparam, &param, sizeof(RayTracingParam),
-             cudaMemcpyHostToDevice);
   cudaMalloc(&gpuout, sizeof(Color) * width * height);
+  cudaMemcpyToSymbol(param, &cpuparam, sizeof RayTracingParam);
   clock_t t1 = clock(); 
-  gpuRayTracing<<<blockPerGrid, threadPerBlock>>>(gpuparam, gpuout);
+  gpuRayTracing<<<width * height / 256, 256>>>(gpuout);
   cudaMemcpy(image, gpuout, sizeof(Color) * width * height, cudaMemcpyDeviceToHost); 
   clock_t t2 = clock();
 
   printf("%f\n", (t2 - t1) / float(CLOCKS_PER_SEC));
-  cudaFree(gpuparam);
   cudaFree(gpuout);
   writebmp("raytracing_cuda.bmp", image, width, height);
   cudaFreeHost(image);
